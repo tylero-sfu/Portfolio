@@ -1,0 +1,179 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+library(forecast)
+library(tseries)
+library(dplyr)
+library(caret)
+library(TSA)
+```
+
+```{r}
+# Data preparation
+data = read.csv("violent_2022_11.csv")
+
+str(data)
+```
+
+```{r}
+temp_violent = data[97:216,]         # Jan, 2011 - Dec, 2020 
+temp_act_violent = data[217:239,]     # Jan, 2011 - Nov, 2022 after Jan, 2021
+
+violent = dplyr::select(temp_violent, "freq")
+act_violent = dplyr::select(temp_act_violent, "freq")
+```
+
+```{r}
+violent_ts = ts(violent, start = c(2011, 1), end = c(2020, 12), frequency = 12); violent_ts
+```
+
+```{r}
+act_violent_ts = ts(act_violent, start = c(2021, 1), end = c(2022, 11), frequency = 12); act_violent_ts
+```
+
+```{r}
+plot(y=violent_ts,x=as.vector(time(violent_ts)),type='l',ylab='Violent Crimes', xlab = 'Year')
+points(y=violent_ts,x=as.vector(time(violent_ts)),pch=as.vector(season(violent_ts)))
+```
+
+```{r}
+# Linear model
+month.=season(violent_ts); violent.lm=lm(violent_ts~month.); summary(violent.lm)
+```
+
+```{r}
+plot(y=rstudent(violent.lm),x=as.vector(time(violent_ts)),type='l',ylab='Standardized Residuals', xlab = 'Year')
+points(y=rstudent(violent.lm),x=as.vector(time(violent_ts)),pch=as.vector(season(violent_ts)))
+```
+
+```{r}
+violent.lm.trend = lm(violent_ts ~ time(violent_ts) + I(time(violent_ts)^2))
+summary(violent.lm.trend)
+```
+
+```{r}
+plot(violent_ts, main = "Time Series with Quadratic Trend", xlab = "Year", ylab = "Violent Crimes")
+points(time(violent_ts), predict.lm(violent.lm.trend), type = "l", col = "blue")
+```
+
+```{r}
+par(mfrow = c(2,2))
+hist(rstudent(violent.lm.trend), main = "Histogram")
+qqnorm(rstudent(violent.lm.trend),main='Normal Q-Q Plot')
+lines(seq(-2.5,2.5,.2),seq(-2.5,2.5,.2),type="l",col="red")
+Acf(resid(violent.lm.trend), main = ''); title("ACF plot", line = 1)
+Pacf(resid(violent.lm.trend), main = ''); title("PaCF plot", line = 1)
+```
+
+```{r}
+# Try adding seasonal component
+violent.lm.seasonal = lm(violent_ts ~ month. + time(violent_ts) + I(time(violent_ts)^2))
+summary(violent.lm.seasonal)
+```
+
+```{r}
+plot(violent_ts, main = "Time Series with Quadratic Trend adding Season", xlab = "Year", ylab = "Violent Crimes")
+points(time(violent_ts), predict.lm(violent.lm.seasonal), type = "l", col = "Red")
+```
+
+```{r}
+par(mfrow = c(2,2))
+hist(rstudent(violent.lm.seasonal), main = "Histogram")
+qqnorm(rstudent(violent.lm.seasonal),main='Normal Q-Q Plot')
+lines(seq(-2.5,2.5,.2),seq(-2.5,2.5,.2),type="l",col="red")
+Acf(resid(violent.lm.seasonal), main = ''); title("ACF plot", line = 1)
+Pacf(resid(violent.lm.seasonal), main = ''); title("PaCF plot", line = 1)
+```
+
+```{r}
+# ARMA(1,2) and ARMA(2,0) could the candidates for prediction.
+par(mfrow=c(1,2))
+Acf(violent_ts)
+
+Pacf(violent_ts)
+
+eacf(violent_ts)
+
+adf.test(violent_ts)
+```
+
+```{r}
+# ARIMA(1,1,0) and ARIMA(1,1,1) could be used for our analysis.
+par(mfrow=c(1,2))
+Acf(diff(log(violent_ts)))
+
+Pacf(diff(log(violent_ts)))
+
+eacf(diff(log(violent_ts)))
+
+adf.test(diff(log(violent_ts)))
+```
+
+```{r}
+arima_compare = array(0, dim = c(5,2))
+
+rownames(arima_compare) = c("ARIMA(1,0,2)", "ARIMA(2,0,0)", "ARIMA(0,1,1)", "ARIMA(1,1,0)", "ARIMA(1,1,1)"); colnames(arima_compare) = c("Log-Like", "AIC")
+
+violent_1_0_2 = arima(violent_ts, c(1,0,2)); violent_2_0_0 = arima(violent_ts, c(2,0,0))
+violent_0_1_1 = arima(violent_ts, c(0,1,1)); violent_1_1_0 = arima(violent_ts, c(1,1,0))
+violent_1_1_1 = arima(violent_ts, c(1,1,1))
+
+arima_compare["ARIMA(1,0,2)", "Log-Like"] = violent_1_0_2$loglik; arima_compare["ARIMA(1,0,2)", "AIC"] = violent_1_0_2$aic
+arima_compare["ARIMA(2,0,0)", "Log-Like"] = violent_2_0_0$loglik; arima_compare["ARIMA(2,0,0)", "AIC"] = violent_2_0_0$aic
+arima_compare["ARIMA(0,1,1)", "Log-Like"] = violent_0_1_1$loglik; arima_compare["ARIMA(0,1,1)", "AIC"] = violent_0_1_1$aic
+arima_compare["ARIMA(1,1,0)", "Log-Like"] = violent_1_1_0$loglik; arima_compare["ARIMA(1,1,0)", "AIC"] = violent_1_1_0$aic
+arima_compare["ARIMA(1,1,1)", "Log-Like"] = violent_1_1_1$loglik; arima_compare["ARIMA(1,1,1)", "AIC"] = violent_1_1_1$aic
+
+arima_compare # In this case, ARMA(1,1,1) is the best.
+```
+
+```{r}
+Box.test(residuals(violent_1_1_1))
+```
+
+```{r}
+violent_arima = auto.arima(violent_ts, stepwise = TRUE)
+violent_arima # Adding seasonality to our previous model is the best using auto.arima function.
+```
+
+```{r}
+violent_final = arima(violent_ts, c(1,1,1), seasonal = list(order = c(2,0,0), period = 12))
+```
+
+```{r}
+checkresiduals(violent_final) # It follows white noise process.
+```
+
+```{r}
+# The mean of residuals seems fairly 0.
+plot(residuals(violent_final), main = "Residual plot of Final Model", xlab = "Year", ylab = "Violent Crimes")
+abline(0, 0)
+```
+
+```{r}
+Box.test(violent_final$residuals, lag = 12, type='Ljung')
+```
+
+```{r}
+violent_forecast = forecast(violent_arima, h = 23);violent_forecast
+```
+
+```{r}
+# Although there are difference between our forecast of year after 2021, our prediction is quite similar in between early 2021 and early 2022.
+
+plot(violent_ts,xlim=c(2011,2023), main = "Forecast of Violent Crimes", xlab = "Year", ylab = "Violent Crimes", oma = c(2,2,4,6))
+abline(v=2021,col="Red",lty=2)
+lines(violent_forecast$mean, type = "l", col = "blue")
+points(act_violent_ts, type = "l", col = "Dark Green")
+legend("top", legend = c("Predicted Crimes", "Actual Crimes"), col = c("blue", "Dark Green"),
+       lty = c(1,1))
+
+```
+
+
+```{r}
+accuracy(violent_forecast, x = act_violent_ts)
+```
