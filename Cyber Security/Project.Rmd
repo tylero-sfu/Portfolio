@@ -1,0 +1,638 @@
+```{r}
+library(zoo)
+library(ggplot2)
+library(dplyr)
+library(factoextra)
+library(ggbiplot)
+library(depmixS4)
+library(randomForest)
+library(reshape2)
+library(viridis)
+library(viridisLite)
+library(BBmisc)
+```
+
+
+### Set up for creating PDF
+```{r}
+# Define the folder path for saving plots
+plots_folder_path <- "cmpt318_plots"
+
+# Ensure the folder exists or create it
+if (!dir.exists(plots_folder_path)) {
+  dir.create(plots_folder_path, recursive = TRUE)
+}
+```
+
+
+```{r}
+df <- read.csv("household_power_consumption.txt", header=TRUE, sep=";")
+```
+
+# Step 1 & 2: Feature Scaling & Feature Engineering
+
+### Year 2006 - 2010 (Year 2007 - 2009 full dataset)
+```{r}
+str(df)
+tail(df)
+```
+
+# Data Preprocessing
+
+## NA values
+```{R}
+sum(is.na(df$Date))
+sum(is.na(df$Time))
+sum(is.na(df$Global_active_power))
+sum(is.na(df$Global_reactive_power))
+sum(is.na(df$Voltage))
+sum(is.na(df$Global_intensity))
+sum(is.na(df$Sub_metering_1))
+sum(is.na(df$Sub_metering_2))
+sum(is.na(df$Sub_metering_3))
+```
+
+### Replacing "?" to NA
+```{r}
+replace_question_mark <- function(value) {ifelse(value == "?", NA, value)}
+df <- data.frame(lapply(df, replace_question_mark))
+```
+
+### Performing Linear interpolation
+```{r}
+df[3:9] <- sapply(df[3:9], na.approx)
+```
+
+### Histogram of Each variables
+```{r}
+par(mfrow=c(1,3))
+hist(df$Sub_metering_1, main = "Histogram of Sub_metering_1", xlab = "Sub_metering_1")
+hist(df$Sub_metering_2, main = "Histogram of Sub_metering_2", xlab = "Sub_metering_2")
+hist(df$Sub_metering_3, main = "Histogram of Sub_metering_3", xlab = "Sub_metering_3")
+
+
+par(mfrow=c(2,2))
+hist(df$Global_active_power, main = "Histogram of Global_active_power", xlab = "Global_active_power")
+hist(df$Global_active_power, main = "Histogram of Global_active_power", xlab = "Global_reactive_power")
+hist(df$Global_intensity, main = "Histogram of Global_intensity", xlab = "Global_intensity")
+hist(df$Voltage, main = "Histogram of Voltage", xlab = "Voltage")
+
+par(mfrow=c(2,2))
+hist(scale(df$Global_active_power), main = "Histogram of Scaled Global_active_power", xlab = "Scaled Global_active_power")
+hist(scale(df$Global_active_power), main = "Histogram of Scaled Global_active_power", xlab = "Scaled Global_reactive_power")
+hist(scale(df$Global_intensity), main = "Histogram of Scaled Global_intensity", xlab = "Scaled Global_intensity")
+hist(scale(df$Voltage), main = "Histogram of Scaled Voltage", xlab = "Scaled Voltage")
+
+par(mfrow=c(2,2))
+hist(normalize(df$Global_active_power, method = "range", range = c(0, 1)), main = "Histogram of Normalized Global_active_power", xlab = "Normalized Global_active_power")
+hist(normalize(df$Global_active_power, method = "range", range = c(0, 1)), main = "Histogram of Normalized Global_active_power", xlab = "Normalized Global_reactive_power")
+hist(normalize(df$Global_intensity, method = "range", range = c(0, 1)), main = "Histogram of Normalized Global_intensity", xlab = "Normalized Global_intensity")
+hist(normalize(df$Voltage, method = "range", range = c(0, 1)), main = "Histogram of Normalized Voltage", xlab = "Normalized Voltage")
+```
+
+### Counting 0s in each column
+```{r}
+total_counts <- sapply(df, length)
+zero_counts <- sapply(df, function(x) sum(x == 0, na.rm = TRUE))
+zero_percentages <- (zero_counts / total_counts) * 100
+
+format(round(zero_percentages,digits=2),nsmall=2)
+```
+
+### Choosing only Wednesday and 7:00 pm to 11:00 pm
+```{R}
+df$Date <- as.POSIXlt(df$Date, format = "%d/%m/%Y")
+df <- df %>% filter(weekdays(Date) == "Wednesday" & Time >= "19:00" & Time <= "23:00")
+```
+
+### Split the data into train and test sets
+```{r}
+df_train <- df %>% filter(format(Date, format="%Y") %in% c(2006,2007,2008))
+df_test <- df %>% filter(format(Date, format="%Y") == 2009)
+```
+
+### Check training and testing sets
+```{R}
+dim(df)
+dim(df_train)
+dim(df_test)
+```
+
+## PCA
+```{r}
+# Scales all relevant features
+scaled_df_train <- data.frame(scale(df_train[, 3:9]))
+
+# Adding scaled data back with original non-scaled columns
+df_train_scaled <- cbind(df_train[,c(1,2)], scaled_df_train)
+
+# Perform PCA on scaled features without scaling again in the prcomp() function
+pca <- prcomp(df_train_scaled[, 3:9], center = FALSE, scale. = FALSE)
+
+summary(pca)
+```
+
+```{r}
+pca$rotation
+```
+
+```{r}
+ggbiplot(pca, varname.color = "red", obs.scale=1, var.scale=1, alpha=0) + xlim(-2.5, 5)
+```
+
+# Step 3: HMM Training and Testing
+
+### 19:00 - 23:00: 240 rows
+### train: 107 times
+### test: 52 times
+
+```{r}
+# STEP: HMM Training and Testing
+# Selecting number of nstates
+state_range <- 4:20
+best_model <- NULL
+best_bic <- Inf
+fitted_models <- list()
+
+# Initialize a data frame to store BIC and log-likelihood for each model
+model_stats <- data.frame(
+  num_states = integer(),
+  BIC = double(),
+  logLik = double(),
+  stringsAsFactors = FALSE
+)
+
+# Fit HMMs with different numbers of states and store their BIC and log-likelihood
+for (num_states in state_range) {
+  # Set a seed for reproducibility
+  set.seed(1)
+
+  hmm_model <- depmix(
+    response = list(scale(Global_active_power) ~ 1,
+                    scale(Global_intensity) ~ 1,
+                    scale(Voltage) ~ 1),
+    data = data.frame(df_train),
+    nstates = num_states,
+    family = list(gaussian(), gaussian(), gaussian()),
+    ntimes = rep(240, each = 107)
+  )
+
+  # Fit the model
+  fitted_model <- fit(hmm_model)
+  model_bic <- BIC(fitted_model)
+
+  # Update best model logic
+  if (model_bic < best_bic) {
+    best_bic <- model_bic
+    best_model <- fitted_model
+  }
+
+  # Store the model stats
+  model_stats <- rbind(model_stats, data.frame(
+    num_states = num_states,
+    BIC = BIC(fitted_model),
+    logLik = logLik(fitted_model)
+  ))
+
+  # Print BIC and logLik to console
+  cat("Number of States:", num_states, "\nBIC:", model_bic, "\n\n")
+
+  # Store the fitted model in the list
+  fitted_models[[as.character(num_states)]] <- fitted_model
+}
+```
+
+# Summary of Best Model
+```{r}
+summary(best_model)
+```
+
+# Find the optimal model based on the lowest BIC
+```{r}
+optimal_model_stats <- model_stats[which.min(model_stats$BIC), ]
+print(model_stats)
+```
+
+# Plotting BIC values across different numbers of states
+```{r}
+ggplot(model_stats, aes(x = num_states, y = BIC)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "BIC for Different Numbers of States",
+       x = "Number of States",
+       y = "BIC") +
+  scale_x_continuous(breaks = seq(min(model_stats$num_states), max(model_stats$num_states), by = 1)) +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the plot title
+```
+
+# Plotting log-likelihood values across different numbers of states
+```{r}
+ggplot(model_stats, aes(x = num_states, y = logLik)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  theme_minimal() +
+  labs(title = "Log-Likelihood for Different Numbers of States",
+       x = "Number of States",
+       y = "Log-Likelihood") +
+  scale_x_continuous(breaks = seq(min(model_stats$num_states), max(model_stats$num_states), by = 1)) +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the plot title
+```
+
+# Compare BIC and log-likelihood side by side
+```{r}
+ggplot(model_stats) +
+  geom_line(aes(x = num_states, y = BIC, colour = "BIC")) +
+  geom_line(aes(x = num_states, y = logLik, colour = "Log-Likelihood")) +
+  geom_point(aes(x = num_states, y = BIC, colour = "BIC")) +
+  geom_point(aes(x = num_states, y = logLik, colour = "Log-Likelihood")) +
+  theme_minimal() +
+  labs(title = "BIC and Log-Likelihood Comparison",
+       x = "Number of States",
+       y = "Values") +
+  scale_colour_manual("",
+                      breaks = c("BIC", "Log-Likelihood"),
+                      values = c("BIC" = "red", "Log-Likelihood" = "blue")) +
+  scale_x_continuous(breaks = seq(min(model_stats$num_states), max(model_stats$num_states), by = 1)) +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the plot title
+
+ggsave(filename = paste0(plots_folder_path, "/BIC_LogLikelihood_Comparison.pdf"), device="pdf", width=8, height=6)
+
+```
+
+# Output the optimal number of states and the associated BIC and log-likelihood
+```{r}
+print("This is only for informational purposes, not the final version")
+print(paste("Optimal number of states based on BIC:", optimal_model_stats$num_states))
+print(paste("BIC of the optimal model:", optimal_model_stats$BIC))
+print(paste("Log-likelihood of the optimal model:", optimal_model_stats$logLik))
+```
+
+# Retrieve the optimal model
+```{r}
+optimal_hmm_model <- fitted_models[[as.character(optimal_model_stats$num_states)]]
+```
+
+# Summary of the optimal fitted model
+```{r}
+summary(optimal_hmm_model)
+```
+
+```{r}
+state_range <- 4:20
+
+# Initialize a data frame to store BIC and log-likelihood for each model
+comparison_stats <- data.frame(
+  num_states = integer(),
+  norm_train = double(),
+  norm_test = double(),
+  stringsAsFactors = FALSE
+)
+
+# Fit HMMs with different numbers of states and store their BIC and log-likelihood
+for (num_states in state_range) {
+  # Set a seed for reproducibility
+  set.seed(1)
+
+  hmm_model_train <- depmix(
+    response = list(scale(Global_active_power) ~ 1,
+                    scale(Global_intensity) ~ 1,
+                    scale(Voltage) ~ 1),
+    data = data.frame(df_train),
+    nstates = num_states,
+    family = list(gaussian(), gaussian(), gaussian()),
+    ntimes = rep(240, each = 107)
+  )
+
+  hmm_model_test <- depmix(
+    response = list(scale(Global_active_power) ~ 1,
+                    scale(Global_intensity) ~ 1,
+                    scale(Voltage) ~ 1),
+    data = data.frame(df_test),
+    nstates = num_states,
+    family = list(gaussian(), gaussian(), gaussian()),
+    ntimes = rep(240, each = 52)
+  )
+
+  fit_train <- fit(hmm_model_train)
+  fit_test <- fit(hmm_model_test)
+
+  # Store the model stats
+  comparison_stats <- rbind(comparison_stats, data.frame(
+    num_states = num_states,
+    norm_train = forwardbackward(fit_train)$logLike / nrow(df_train),
+    norm_test = forwardbackward(fit_test)$logLike / nrow(df_test)
+  ))
+}
+
+```
+
+```{r}
+comparison_stats
+```
+
+# Step 4: Anomaly Detection
+
+```{r}
+# Sizes for each subset
+subset_sizes <- c(1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200, 1440, 1440)
+
+# List to store the subsets
+subsets <- list()
+
+# Current index in df_test
+current_index <- 1
+
+# Loop through subset sizes
+for (size in subset_sizes) {
+  # Extract subset from df_test
+  subset <- df_test[current_index:(current_index + size - 1), ]
+  # Append subset to the list
+  subsets <- c(subsets, list(subset))
+  # Update current index
+  current_index <- current_index + size
+}
+```
+
+```{r}
+# Initialize variables to store the maximum deviation and corresponding subset index
+max_deviation <- -Inf
+max_deviation_subset <- NULL
+
+# Initialize a list to store the results
+subset_results <- list()
+
+# Loop through each subset
+for (i in 1:8) {
+  set.seed(1)
+  # Fit the HMM model to the current subset of test data
+  hmm_model_subset <- depmix(
+    response = list(scale(Global_active_power) ~ 1,
+                    scale(Global_intensity) ~ 1,
+                    scale(Voltage) ~ 1),
+    data = data.frame(subsets[[i]]),
+    nstates = 18,
+    family = list(gaussian(), gaussian(), gaussian()),
+    ntimes = rep(240, each=5)
+  )
+  fit_hmm_model_subset <- fit(hmm_model_subset)
+
+  # Store the fitted model in the list of results
+  subset_results[[i]] <- fit_hmm_model_subset
+
+  # Calculate normalized log-likelihood for the current subset
+  norm_log_likelihood_subset <- forwardbackward(fit_hmm_model_subset)$logLike / 1200
+
+  deviation = norm_log_likelihood_subset
+
+  # Check if this deviation is the maximum seen so far
+  if (deviation > max_deviation) {
+    max_deviation <- deviation
+    max_deviation_subset <- i
+  }
+}
+
+for (i in 9:10) {
+  set.seed(1)
+  # Fit the HMM model to the current subset of test data
+  hmm_model_subset <- depmix(
+    response = list(scale(Global_active_power) ~ 1,
+                    scale(Global_intensity) ~ 1,
+                    scale(Voltage) ~ 1),
+    data = data.frame(subsets[[i]]),
+    nstates = 18,
+    family = list(gaussian(), gaussian(), gaussian()),
+    ntimes = rep(240, each=6)
+  )
+  fit_hmm_model_subset <- fit(hmm_model_subset)
+
+  # Store the fitted model in the list of results
+  subset_results[[i]] <- hmm_model_subset
+
+  # Calculate normalized log-likelihood for the current subset
+  norm_log_likelihood_subset <- forwardbackward(fit_hmm_model_subset)$logLike / 1440
+
+  deviation <- norm_log_likelihood_subset
+
+  # Check if this deviation is the maximum seen so far
+  if (deviation > max_deviation) {
+    max_deviation <- deviation
+    max_deviation_subset <- i
+  }
+}
+
+max_deviation - norm_train
+
+```
+
+# Function for calculating logLik
+```{r}
+calculate_logLik_for_subset <- function(subset_data, model_params, nstates) {
+  # Checking for invalid values in the dataset
+  invalid_values <- sapply(subset_data, function(x) {
+    sum(is.na(x)) +
+            sum(is.nan(x)) +
+            sum(is.infinite(x))
+  })
+  if (any(invalid_values != 0)) {
+    stop("Data contains NA, NaN, or Inf values which cannot be processed.")
+  }
+
+  subset_model <- depmix(list(scale(Global_active_power) ~ 1,
+                              scale(Global_intensity) ~ 1,
+                              scale(Voltage) ~ 1),
+                         data = subset_data,
+                         nstates = nstates,
+                         family = list(gaussian(), gaussian(), gaussian()))
+
+  fixed_subset_model <- setpars(subset_model, model_params, fixed = rep(TRUE, length(model_params)))
+  fitted_subset_model <- fit(fixed_subset_model)
+  return(logLik(fitted_subset_model))
+}
+```
+
+### Calculate Log-Likelihood for Test Data
+```{r}
+# Calculate log-likelihood for each subset
+num_parts <- 10
+logLik_values <- numeric(num_parts)
+model_params <- getpars(optimal_hmm_model)
+
+for (i in 1:10) {
+  subset_data <- df_test[((i - 1) * nrow(df_test) / 10 + 1):(i * nrow(df_test) / 10),]
+  logLik_values[i] <- calculate_logLik_for_subset(subset_data, model_params, optimal_model_stats$num_states)
+}
+
+# Determine the log-likelihood threshold for anomalies
+threshold <- quantile(logLik_values, probs = 0.05)
+
+# Map the anomaly detection to the original df_test data
+subset_size <- nrow(df_test) / 10
+df_test$is_anomaly_loglik <- rep(FALSE, nrow(df_test))
+
+for (i in 1:10) {
+  start_idx <- ((i - 1) * subset_size) + 1
+  end_idx <- i * subset_size
+  df_test$is_anomaly_loglik[start_idx:end_idx] <- logLik_values[i] < threshold
+}
+
+# Check the number of anomalies detected
+print(table(df_test$is_anomaly_loglik))
+```
+
+```{r}
+# The scatter plot
+# First plot the points where is_anomaly_loglik is FALSE
+ggplot(df_test, aes(x = Voltage, y = Global_active_power)) +
+  geom_point(data = df_test %>% filter(is_anomaly_loglik == FALSE),
+             aes(color = is_anomaly_loglik)) +
+  scale_color_manual(values = c("FALSE" = "blue", "TRUE" = "red")) +
+
+  # Then add the points where is_anomaly_loglik is TRUE
+  geom_point(data = df_test %>% filter(is_anomaly_loglik == TRUE),
+             aes(color = is_anomaly_loglik)) +
+
+  labs(title = "Scatter Plot of Global Active Power vs. Voltage with Anomalies",
+       x = "Voltage (V)",
+       y = "Global Active Power (kW)",
+       color = "Anomaly Status") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the plot title
+
+# Save the plot
+ggsave(filename = paste0(plots_folder_path, "/LogLikelihood_GlobalActivePower_Voltage_Anomalies.pdf"),
+       device = "pdf",
+       width = 8,
+       height = 6)
+```
+
+```{r}
+# Density plot with normal data and anomalies highlighted
+ggplot(df_test, aes(x = Global_active_power, fill = is_anomaly_loglik)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("FALSE" = "blue", "TRUE" = "red")) +
+  labs(title = "Density Plot of Global Active Power with Anomalies",
+       x = "Global Active Power (kW)",
+       y = "Density",
+       fill = "Anomaly Status") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the plot title
+
+# Save the plot
+ggsave(filename = paste0(plots_folder_path, "/LogLikelihood_DensityPlot_GlobalActivePower_Anomalies.pdf"),
+       device = "pdf",
+       width = 8,
+       height = 6)
+
+# Create the ggplot for Global Active Power with log-likelihood anomalies
+ggplot(df_test, aes(x = Date, y = Global_active_power)) +
+  geom_line() +
+  geom_point(aes(color = as.factor(is_anomaly_loglik)), size = 1.5, alpha = 0.8) +
+  scale_color_manual(values = c("FALSE" = "blue", "TRUE" = "red")) +
+  labs(title = "Global Active Power Over Time with Anomalies Highlighted",
+       x = "Date",
+       y = "Global Active Power (kW)",
+       color = "Anomaly Status") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(filename = paste0(plots_folder_path, "/LogLikelihood_OverTime_GlobalActivePower_Anomalies.pdf"),
+       device = "pdf",
+       width = 10,
+       height = 6)
+```
+
+```{r}
+# Create a boxplot
+ggplot(df_test, aes(x = factor(is_anomaly_loglik), y = Global_active_power, color = is_anomaly_loglik)) +
+  geom_boxplot() +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+  labs(title = "Boxplot of Global Active Power with Anomalies Highlighted",
+       x = "Anomaly Status",
+       y = "Global Active Power (kW)",
+       color = "Anomaly Status") +
+  scale_x_discrete(labels = c("FALSE" = "Normal", "TRUE" = "Anomaly")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Save the plot
+ggsave(filename = paste0(plots_folder_path, "/LogLikelihood_Boxplot_GlobalActivePower_Anomalies.pdf"),
+       device = "pdf",
+       width = 8,
+       height = 6)
+```
+
+### Calculate PCA for test dataset & Plot
+```{r}
+# Run PCA
+pca_test <- prcomp(df_test[, c("Global_active_power", "Global_reactive_power", "Voltage",
+                               "Global_intensity", "Sub_metering_1", "Sub_metering_2", "Sub_metering_3")],
+                   center = TRUE, scale. = TRUE)
+
+# Add anomaly status to PCA data frame
+df_pca <- as.data.frame(pca_test$x)
+df_pca$is_anomaly_loglik <- df_test$is_anomaly_loglik
+
+# Order factor levels to control plot stacking
+df_pca$is_anomaly_loglik <- factor(df_pca$is_anomaly_loglik, levels = c("FALSE", "TRUE"))
+
+# Calculate the variable vectors from PCA loadings
+loadings <- data.frame(pca_test$rotation[, 1:2])
+loadings$variable <- rownames(pca_test$rotation)
+
+# Normalize the length of vectors
+scale_factor <- 4
+loadings$PC1 <- loadings$PC1 * scale_factor
+loadings$PC2 <- loadings$PC2 * scale_factor
+
+# Add a buffer to position the labels slightly away from the arrow heads
+label_buffer <- 0.2
+
+# Create biplot with vectors and labels
+p <- ggplot(df_pca, aes(x = PC1, y = PC2, color = is_anomaly_loglik)) +
+  geom_point(data = subset(df_pca, is_anomaly_loglik == "FALSE"),
+             aes(x = PC1, y = PC2), alpha = 0.6, color = "#6ca0dc") +
+  geom_point(data = subset(df_pca, is_anomaly_loglik == "TRUE"),
+             aes(x = PC1, y = PC2), alpha = 0.6, color = "red") +
+  scale_color_manual(values = c("FALSE" = "#6ca0dc", "TRUE" = "red"),
+                     name = "Anomaly Status",
+                     labels = c("Normal", "Anomaly")) +
+  theme_minimal() +
+  labs(title = "PCA Biplot with Anomaly Status") +
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5))
+
+
+loadings <- pca_test$rotation[, 1:2] * scale_factor
+loadings_df <- as.data.frame(loadings)
+names(loadings_df) <- c("xend", "yend")
+loadings_df$x <- 0
+loadings_df$y <- 0
+loadings_df$variable <- rownames(loadings)
+loadings_df$label_hjust <- ifelse(loadings_df$xend < 0, 1, 0)
+loadings_df$label_vjust <- ifelse(loadings_df$yend < 0, 1, 0)
+
+# Calculate angles for the text labels
+loadings_df$angle <- ifelse(loadings_df$xend < 0,
+                            atan2(loadings_df$yend, loadings_df$xend) * (180 / pi) + 180,
+                            atan2(loadings_df$yend, loadings_df$xend) * (180 / pi))
+
+# Add vectors to the plot
+p <- p + geom_segment(data = loadings_df, aes(x = x, y = y, xend = xend, yend = yend),
+                      arrow = arrow(length = unit(0.2, "inches")), size = 1, color = "#1d1d1d")
+
+# Add text labels to the plot, adjusting for the calculated angles
+p <- p + geom_text(
+  data = loadings_df,
+  aes(x = xend * (1 + label_buffer), y = yend * (1 + label_buffer),
+      label = variable, hjust = label_hjust, vjust = label_vjust),
+  color = "black", size = 4)
+
+# Print the biplot
+print(p)
+
+# To save the plot
+ggsave(filename = paste0(plots_folder_path, "/PCA_Biplot_with_Anomalies.pdf"),
+       device = "pdf",
+       width = 8,
+       height = 6)
+```
