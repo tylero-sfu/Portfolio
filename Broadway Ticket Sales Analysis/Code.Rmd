@@ -1,0 +1,104 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+```{r}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(lsmeans)
+```
+
+# Reading the data
+```{r}
+df = read.csv('broadway_stat300.csv')
+```
+
+# Feature of the data
+```{r}
+summary(df)
+```
+
+# Variable
+```{r}
+str(df)
+```
+
+# Show type has three levels: Play, Musical and Special.
+```{r}
+unique(df$Show.Type)
+```
+
+# Removing some rows have 0s.
+```{r}
+head(df[which(df$Number.Performances == 0),])
+
+df = df[-which(df$Number.Performances == 0),]
+```
+
+# Number of Observations of each show
+```{r}
+nrow(df[df$Show.Type == 'Musical',])
+nrow(df[df$Show.Type == 'Play',])
+nrow(df[df$Show.Type == 'Special',])
+```
+
+# Summary of full model before tranformation
+```{r}
+summary(lm(Total.Gross ~ Show.Type + Number.Performances, data = df))
+```
+
+# Normality Test with full model
+```{r}
+par(mfrow=c(1,2))
+plot(lm(Total.Gross ~ Show.Type + Number.Performances, data = df))
+```
+
+# Normality test with the data after tranformation
+```{r}
+par(mfrow=c(1,2))
+plot(lm(log(Total.Gross) ~ Show.Type + log(Number.Performances), data = df))
+```
+
+```{r}
+summary(lm(log(Total.Gross) ~ log(Number.Performances) + factor(Show.Type), data = df))
+```
+
+# ANOVA testing:
+# it confirms there are signifncant differences in the mean total gross across the different show types
+# the p value is small. it suggest strong evidnece aginst H0.
+# At least one pair of show types has significantly differnet mean total gross.
+
+```{r}
+aov_reduced<- lm(Total.Gross ~ Number.Performances, data = df)
+aov_full <- lm(Total.Gross ~ Number.Performances + Show.Type, data = df)
+anova(aov_reduced, aov_full)
+
+aov_tr_reduced <- lm(log(Total.Gross) ~ log(Number.Performances), data = df)
+aov_tr_full <- lm(log(Total.Gross) ~ log(Number.Performances) + Show.Type, data = df)
+aov_model <- anova(lm1, lm2)
+aov_model
+```
+
+# Tukey Testing to support the above ANOVA Testing
+```{r}
+tuk=lm(log(Total.Gross)~log(Number.Performances)+factor(Show.Type), df)
+
+#Calculate CIs for all pairwise comparisons of means (with family-wise
+#confidence level of 0.95):
+x=lsmeans(tuk,pairwise~Show.Type)$contrasts
+confint(x, level = 0.95)
+```
+
+```{r}
+plot(x, main = "95% family-wise Confidence Interval", xlab = "Estimated Differences", ylab = "")
+```
+
+# Differences between number of performance by show types
+```{r}
+df %>%
+  group_by(Show.Type) %>%
+  summarize(n_performances = sum(Number.Performances))
+```
