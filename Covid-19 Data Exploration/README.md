@@ -1,11 +1,6 @@
-# Portfolio Projects
+# COVID-19 Data Exploration
 
-Welcome to my portfolio! <br><br>Browse through my projects to see how I use data to uncover insights and solve real-world problems.
+Explanations
 
 ## Languages & Skills
-* Python
-* R
 * SQL
-* Tableau
-* HTML5
-* CSS3

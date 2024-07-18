@@ -1,3 +1,11 @@
+# Yelp Database Management
+
+Explanations
+
+## Languages & Skills
+* Python
+* SQL
+
 Usage Instructions
 
 Setup:
