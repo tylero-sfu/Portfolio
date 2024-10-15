@@ -1,12 +1,6 @@
 # Yelp Database Management
 
-Explanations
-
-## Languages & Skills
-* Python
-* SQL
-
-Usage Instructions
+### Usage Instructions
 
 Setup:
 
@@ -53,3 +47,7 @@ Creates a review entry in the review table with a randomly generated user_id, bu
 
 Closes the database connection.
 Terminates the program.
+
+## Languages & Skills
+* Python
+* SQL
